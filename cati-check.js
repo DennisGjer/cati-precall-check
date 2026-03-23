@@ -173,6 +173,7 @@ if (startInterviewBtn) {
         score: 8
       };
     }
+  }
 
     let okCount = 0;
     let latencySum = 0;
