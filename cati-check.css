@@ -1,91 +1,40 @@
 #cati-precall-check {
-  margin: 8px 0 12px;
+  margin: 6px 0 10px;
   font-family: Arial, Helvetica, sans-serif;
   color: #1f2937;
 }
 
-.cati-check {
-  border: 1px solid #d9dee5;
-  border-radius: 7px;
-  background: #ffffff;
-  padding: 10px 12px;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.03);
-}
-
-.cati-check__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-
-.cati-check__header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.cati-check__title {
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.cati-check__controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  margin-bottom: 10px;
-  font-size: 12px;
-  color: #667085;
-}
-
-.cati-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.cati-switch input {
-  margin: 0;
-}
-
-.cati-check__linkbtn {
-  border: none;
-  background: transparent;
-  color: #475467;
-  font-size: 12px;
-  padding: 0;
-  cursor: pointer;
-  text-decoration: underline;
-}
-
-.cati-check__linkbtn:hover {
-  color: #1d2939;
+.cati-check-minimal {
+  width: 100%;
 }
 
 .cati-check__grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(260px, 340px) minmax(260px, 340px);
   gap: 10px;
+  align-items: start;
 }
 
 .cati-card {
-  border: 1px solid #eaecf0;
+  border: 1px solid #e5e7eb;
   border-radius: 7px;
-  padding: 10px;
+  padding: 10px 11px 8px;
   background: #fcfcfd;
+  min-height: 150px;
 }
 
 .cati-card__top {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   margin-bottom: 6px;
+}
+
+.cati-card__top-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .cati-card__label {
@@ -99,14 +48,22 @@
 .cati-card__status {
   font-size: 14px;
   font-weight: 700;
-  margin-bottom: 3px;
+  margin-bottom: 4px;
+  line-height: 1.25;
 }
 
 .cati-card__details {
   font-size: 12px;
   color: #667085;
   line-height: 1.35;
-  min-height: 32px;
+  min-height: 34px;
+}
+
+.cati-card__meta {
+  margin-top: 8px;
+  font-size: 10px;
+  color: #98a2b3;
+  text-align: right;
 }
 
 .cati-badge {
@@ -139,13 +96,29 @@
   color: #b42318;
 }
 
+.cati-iconbtn {
+  border: none;
+  background: transparent;
+  color: #98a2b3;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.cati-iconbtn:hover {
+  color: #475467;
+}
+
 .cati-meter {
   width: 100%;
   height: 5px;
   border-radius: 999px;
   background: #edf2f7;
   overflow: hidden;
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
 .cati-meter__bar {
@@ -172,17 +145,10 @@
 }
 
 .cati-mic-actions {
-  margin-top: 8px;
+  margin-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.cati-mic-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
 }
 
 .cati-btn {
@@ -201,33 +167,15 @@
   background: #f9fafb;
 }
 
-.cati-btn:disabled,
-.cati-check__linkbtn:disabled {
+.cati-btn:disabled {
   opacity: 0.65;
   cursor: not-allowed;
 }
 
-.cati-inline-note {
-  font-size: 11px;
-  color: #667085;
-}
-
 .cati-audio {
   width: 100%;
-  max-width: 260px;
+  max-width: 240px;
   height: 30px;
-}
-
-.cati-check__footer {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid #eaecf0;
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 11px;
-  color: #667085;
-  flex-wrap: wrap;
 }
 
 @media (max-width: 860px) {
@@ -235,9 +183,7 @@
     grid-template-columns: 1fr;
   }
 
-  .cati-check__header,
-  .cati-check__footer {
-    flex-direction: column;
-    align-items: flex-start;
+  .cati-card {
+    min-height: auto;
   }
 }
