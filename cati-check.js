@@ -136,12 +136,13 @@
       });
     }
 
-if (startInterviewBtn) {
-  startInterviewBtn.addEventListener("click", function () {
-    // 🔥 kjør synkront først
-    unlockAudio();
-    primeInteractionFeatures();
-  }, { once: true });
+  if (startInterviewBtn) {
+    startInterviewBtn.addEventListener("click", function () {
+      // 🔥 kjør synkront først
+      unlockAudio();
+      primeInteractionFeatures();
+    }, { once: true });
+  }
 }
 
   function startNetworkInterval() {
@@ -173,7 +174,6 @@ if (startInterviewBtn) {
         score: 8
       };
     }
-  }
 
     let okCount = 0;
     let latencySum = 0;
