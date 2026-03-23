@@ -136,12 +136,13 @@
       });
     }
 
-    if (startInterviewBtn) {
-      startInterviewBtn.addEventListener("click", function () {
-        primeInteractionFeatures();
-      }, { once: true });
-    }
-  }
+if (startInterviewBtn) {
+  startInterviewBtn.addEventListener("click", function () {
+    // 🔥 kjør synkront først
+    unlockAudio();
+    primeInteractionFeatures();
+  }, { once: true });
+}
 
   function startNetworkInterval() {
     stopNetworkInterval();
@@ -395,10 +396,28 @@
     }
   }
 
-  function playWarningTone() {
-    try {
-      const ctx = state.audioContext;
-      if (!ctx || ctx.state !== "running") return;
+function playWarningTone() {
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+
+    console.log("[CATI Check] playWarningTone called. Audio state:", ctx?.state);
+
+    // 🔥 fallback: lag context hvis den ikke finnes
+    if (!state.audioContext && AudioContextClass) {
+      state.audioContext = new AudioContextClass();
+    }
+
+    const ctx = state.audioContext;
+
+    // 🔥 hvis fortsatt ikke klar → prøv å resume
+    if (ctx && ctx.state === "suspended") {
+      ctx.resume();
+    }
+
+    if (!ctx || ctx.state !== "running") {
+      console.warn("[CATI Check] Audio not unlocked yet");
+      return;
+    }
 
       const now = ctx.currentTime;
 
