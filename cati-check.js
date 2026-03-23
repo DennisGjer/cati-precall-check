@@ -13,7 +13,7 @@
     notifyCooldownMs: 3 * 60 * 1000,
     minConsecutiveIssuesBeforeNotify: 2,
     titleAlertPrefix: "⚠ ",
-    autoAskNotificationPermission: true,
+    autoAskNotificationPermission: false,
     storageKeys: {
       networkPaused: "catiCheck.networkPaused"
     }
@@ -112,6 +112,7 @@
   function bindEvents() {
     const micBtn = document.getElementById("catiMicTestBtn");
     const pauseBtn = document.getElementById("catiNetworkPauseBtn");
+    const startInterviewBtn = document.getElementById("startInterview");
 
     if (micBtn) {
       micBtn.addEventListener("click", function () {
@@ -133,6 +134,12 @@
 
         updateNetworkUI();
       });
+    }
+
+    if (startInterviewBtn) {
+      startInterviewBtn.addEventListener("click", function () {
+        primeInteractionFeatures();
+      }, { once: true });
     }
   }
 
@@ -584,7 +591,16 @@
 
   async function primeInteractionFeatures() {
     await unlockAudio();
-    tryAutoRequestNotificationPermission();
+
+    if ("Notification" in window && Notification.permission === "default") {
+      try {
+        await Notification.requestPermission();
+      } catch (err) {
+        console.warn("[CATI Check] Notification permission request failed:", err);
+      }
+    }
+
+    console.log("[CATI Check] Audio + notifications primed from Start interviewing.");
   }
 
   init();
