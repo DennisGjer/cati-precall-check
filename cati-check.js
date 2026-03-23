@@ -2,14 +2,22 @@
   const CONFIG = {
     containerId: "cati-precall-check",
     pingUrl: window.location.origin + "/favicon.ico",
-    pingIntervalMs: 4000,
+    pingIntervalMs: 5000,
     pingTimeoutMs: 2500,
     timeWindowMinutes: 10,
     severeLatencyMs: 600,
     warningLatencyMs: 250,
     severeLossPercent: 15,
     warningLossPercent: 5,
-    micRecordSeconds: 4
+    micRecordSeconds: 8,
+    notifyCooldownMs: 3 * 60 * 1000,
+    minConsecutiveIssuesBeforeNotify: 2,
+    titleAlertPrefix: "⚠ ",
+    storageKeys: {
+      networkPaused: "catiCheck.networkPaused",
+      notificationsEnabled: "catiCheck.notificationsEnabled",
+      micLastTested: "catiCheck.micLastTested"
+    }
   };
 
   const state = {
@@ -19,7 +27,14 @@
     mediaStream: null,
     audioChunks: [],
     lastAudioUrl: null,
-    micSupported: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)
+    micSupported: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder),
+    networkPaused: readBool(CONFIG.storageKeys.networkPaused, false),
+    notificationsEnabled: readBool(CONFIG.storageKeys.notificationsEnabled, false),
+    lastNotificationAt: 0,
+    lastNetworkStatus: "unknown",
+    consecutiveIssueCount: 0,
+    originalTitle: document.title,
+    titleAlertActive: false
   };
 
   function init() {
@@ -31,9 +46,14 @@
 
     container.innerHTML = renderWidget();
     bindEvents();
+    syncToggleUI();
+    updateMicLastTestedUI();
     updateNetworkUI();
-    runPing();
-    state.intervalId = setInterval(runPing, CONFIG.pingIntervalMs);
+
+    if (!state.networkPaused) {
+      runPing();
+      startNetworkInterval();
+    }
   }
 
   function renderWidget() {
@@ -42,11 +62,25 @@
         <div class="cati-check__header">
           <div>
             <div class="cati-check__title">Oppstartssjekk</div>
-            <div class="cati-check__subtitle">Tilkobling og mikrofon</div>
           </div>
-          <button type="button" class="cati-check__refresh" id="catiCheckRefreshBtn">
-            Kjør test på nytt
-          </button>
+
+          <div class="cati-check__header-actions">
+            <button type="button" class="cati-check__linkbtn" id="catiCheckRefreshBtn">
+              Test nå
+            </button>
+          </div>
+        </div>
+
+        <div class="cati-check__controls">
+          <label class="cati-switch">
+            <input type="checkbox" id="catiNetworkPauseToggle">
+            <span>Pause nettverkssjekk</span>
+          </label>
+
+          <label class="cati-switch">
+            <input type="checkbox" id="catiNotificationsToggle">
+            <span>Varsler</span>
+          </label>
         </div>
 
         <div class="cati-check__grid">
@@ -62,7 +96,7 @@
             </div>
 
             <div class="cati-meter" aria-hidden="true">
-              <div id="catiNetworkBar" class="cati-meter__bar" style="width: 8%"></div>
+              <div id="catiNetworkBar" class="cati-meter__bar cati-meter__bar--neutral" style="width: 8%"></div>
             </div>
           </div>
 
@@ -78,9 +112,13 @@
             </div>
 
             <div class="cati-mic-actions">
-              <button type="button" id="catiMicTestBtn" class="cati-btn">
-                Test mikrofon
-              </button>
+              <div class="cati-mic-row">
+                <button type="button" id="catiMicTestBtn" class="cati-btn">
+                  Test mikrofon
+                </button>
+                <span id="catiMicLastTested" class="cati-inline-note">Sist testet: –</span>
+              </div>
+
               <audio id="catiMicPlayback" controls class="cati-audio" hidden></audio>
             </div>
           </div>
@@ -97,10 +135,14 @@
   function bindEvents() {
     const refreshBtn = document.getElementById("catiCheckRefreshBtn");
     const micBtn = document.getElementById("catiMicTestBtn");
+    const pauseToggle = document.getElementById("catiNetworkPauseToggle");
+    const notifToggle = document.getElementById("catiNotificationsToggle");
 
     if (refreshBtn) {
       refreshBtn.addEventListener("click", function () {
-        runPing();
+        if (!state.networkPaused) {
+          runPing();
+        }
       });
     }
 
@@ -108,6 +150,51 @@
       micBtn.addEventListener("click", function () {
         startMicTest();
       });
+    }
+
+    if (pauseToggle) {
+      pauseToggle.addEventListener("change", function (e) {
+        state.networkPaused = !!e.target.checked;
+        writeBool(CONFIG.storageKeys.networkPaused, state.networkPaused);
+
+        if (state.networkPaused) {
+          stopNetworkInterval();
+        } else {
+          runPing();
+          startNetworkInterval();
+        }
+
+        updateNetworkUI();
+      });
+    }
+
+    if (notifToggle) {
+      notifToggle.addEventListener("change", async function (e) {
+        const enabled = !!e.target.checked;
+
+        if (enabled) {
+          const granted = await ensureNotificationPermission();
+          state.notificationsEnabled = granted;
+          writeBool(CONFIG.storageKeys.notificationsEnabled, granted);
+        } else {
+          state.notificationsEnabled = false;
+          writeBool(CONFIG.storageKeys.notificationsEnabled, false);
+        }
+
+        syncToggleUI();
+      });
+    }
+  }
+
+  function startNetworkInterval() {
+    stopNetworkInterval();
+    state.intervalId = setInterval(runPing, CONFIG.pingIntervalMs);
+  }
+
+  function stopNetworkInterval() {
+    if (state.intervalId) {
+      clearInterval(state.intervalId);
+      state.intervalId = null;
     }
   }
 
@@ -184,21 +271,27 @@
 
     if (!statusEl || !detailsEl || !badgeEl || !barEl || !footerEl || !updatedEl) return;
 
-    const info = calculateNetworkStatus();
+    if (state.networkPaused) {
+      statusEl.textContent = "Nettverkssjekk er satt på pause";
+      detailsEl.textContent = "Automatiske målinger er stoppet for denne nettleseren.";
+      badgeEl.textContent = "Pause";
+      badgeEl.className = "cati-badge cati-badge--neutral";
+      barEl.className = "cati-meter__bar cati-meter__bar--neutral";
+      barEl.style.width = "0%";
+      footerEl.textContent = "Nettverkssjekk er slått av.";
+      updatedEl.textContent = `Sist oppdatert: ${formatTime(new Date())}`;
+      clearTitleAlert();
+      return;
+    }
 
+    const info = calculateNetworkStatus();
     const latencyText = info.avgLatency != null ? `${info.avgLatency.toFixed(0)} ms` : "–";
     const lossText = info.lossPercent != null ? `${info.lossPercent.toFixed(1)} %` : "–";
 
     detailsEl.textContent =
-      `Gj.snittlig forsinkelse: ${latencyText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount}`;
+      `Forsinkelse: ${latencyText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount}`;
 
     barEl.style.width = `${info.score}%`;
-
-    const root = statusEl.closest(".cati-card");
-    if (root) {
-      root.classList.remove("is-good", "is-warning", "is-bad", "is-neutral");
-    }
-
     badgeEl.className = "cati-badge";
     barEl.className = "cati-meter__bar";
 
@@ -207,29 +300,27 @@
       badgeEl.textContent = "God";
       badgeEl.classList.add("cati-badge--good");
       barEl.classList.add("cati-meter__bar--good");
-      root && root.classList.add("is-good");
       footerEl.textContent = "Du er klar til å starte intervju.";
+      clearTitleAlert();
     } else if (info.status === "warning") {
       statusEl.textContent = "Ustabil tilkobling";
       badgeEl.textContent = "Ustabil";
       badgeEl.classList.add("cati-badge--warning");
       barEl.classList.add("cati-meter__bar--warning");
-      root && root.classList.add("is-warning");
       footerEl.textContent = "Du kan oppleve problemer. Følg med på lyd og stabilitet.";
     } else if (info.status === "bad") {
       statusEl.textContent = "Kritisk tilkobling";
       badgeEl.textContent = "Kritisk";
       badgeEl.classList.add("cati-badge--bad");
       barEl.classList.add("cati-meter__bar--bad");
-      root && root.classList.add("is-bad");
       footerEl.textContent = "Anbefalt å sjekke nettverk før du starter intervju.";
     } else {
       statusEl.textContent = "Måler tilkobling…";
       badgeEl.textContent = "Ukjent";
       badgeEl.classList.add("cati-badge--neutral");
       barEl.classList.add("cati-meter__bar--neutral");
-      root && root.classList.add("is-neutral");
       footerEl.textContent = "Systemet gjør en kort oppstartssjekk.";
+      clearTitleAlert();
     }
 
     updatedEl.textContent = `Sist oppdatert: ${formatTime(new Date())}`;
@@ -255,7 +346,7 @@
           ts: Date.now()
         });
 
-        updateNetworkUI();
+        afterNetworkMeasurement();
       })
       .catch(() => {
         clearTimeout(timeoutId);
@@ -266,8 +357,140 @@
           ts: Date.now()
         });
 
-        updateNetworkUI();
+        afterNetworkMeasurement();
       });
+  }
+
+  function afterNetworkMeasurement() {
+    const info = calculateNetworkStatus();
+
+    if (info.status === "warning" || info.status === "bad") {
+      state.consecutiveIssueCount += 1;
+    } else {
+      state.consecutiveIssueCount = 0;
+    }
+
+    updateNetworkUI();
+    maybeNotifyNetworkIssue(info);
+
+    state.lastNetworkStatus = info.status;
+  }
+
+  function maybeNotifyNetworkIssue(info) {
+    if (state.networkPaused) return;
+    if (!state.notificationsEnabled) return;
+    if (!(info.status === "warning" || info.status === "bad")) return;
+    if (state.consecutiveIssueCount < CONFIG.minConsecutiveIssuesBeforeNotify) return;
+
+    const now = Date.now();
+    if (now - state.lastNotificationAt < CONFIG.notifyCooldownMs) return;
+
+    const title = info.status === "bad"
+      ? "Kritisk nettverksproblem"
+      : "Ustabil tilkobling oppdaget";
+
+    const body = info.status === "bad"
+      ? "Tilkoblingen virker kritisk. Sjekk nettverk eller flytt til mer stabil forbindelse."
+      : "Tilkoblingen virker ustabil. Du kan oppleve lydproblemer.";
+
+    if ("Notification" in window && Notification.permission === "granted") {
+      try {
+        new Notification(title, { body });
+      } catch (err) {
+        console.warn("[CATI Check] Notification failed:", err);
+      }
+    }
+
+    triggerTitleAlert(title);
+    playWarningTone();
+    state.lastNotificationAt = now;
+  }
+
+  async function ensureNotificationPermission() {
+    if (!("Notification" in window)) {
+      return false;
+    }
+
+    if (Notification.permission === "granted") {
+      return true;
+    }
+
+    if (Notification.permission === "denied") {
+      return false;
+    }
+
+    try {
+      const result = await Notification.requestPermission();
+      return result === "granted";
+    } catch (err) {
+      console.warn("[CATI Check] Notification permission failed:", err);
+      return false;
+    }
+  }
+
+  function triggerTitleAlert(text) {
+    if (document.hidden) {
+      document.title = `${CONFIG.titleAlertPrefix}${text}`;
+      state.titleAlertActive = true;
+    }
+  }
+
+  function clearTitleAlert() {
+    if (state.titleAlertActive) {
+      document.title = state.originalTitle;
+      state.titleAlertActive = false;
+    }
+  }
+
+  function playWarningTone() {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+
+      const ctx = new AudioContextClass();
+      const now = ctx.currentTime;
+
+      const master = ctx.createGain();
+      master.gain.setValueAtTime(0.0001, now);
+      master.gain.exponentialRampToValueAtTime(0.03, now + 0.02);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.9);
+      master.connect(ctx.destination);
+
+      const osc1 = ctx.createOscillator();
+      osc1.type = "sine";
+      osc1.frequency.setValueAtTime(880, now);
+
+      const osc2 = ctx.createOscillator();
+      osc2.type = "sine";
+      osc2.frequency.setValueAtTime(660, now + 0.18);
+
+      const gain1 = ctx.createGain();
+      gain1.gain.setValueAtTime(1, now);
+      gain1.gain.setValueAtTime(0.0001, now + 0.22);
+
+      const gain2 = ctx.createGain();
+      gain2.gain.setValueAtTime(0.0001, now);
+      gain2.gain.setValueAtTime(0.0001, now + 0.18);
+      gain2.gain.exponentialRampToValueAtTime(1, now + 0.2);
+      gain2.gain.setValueAtTime(0.0001, now + 0.5);
+
+      osc1.connect(gain1);
+      gain1.connect(master);
+
+      osc2.connect(gain2);
+      gain2.connect(master);
+
+      osc1.start(now);
+      osc1.stop(now + 0.24);
+      osc2.start(now);
+      osc2.stop(now + 0.55);
+
+      setTimeout(() => {
+        try { ctx.close(); } catch (_) {}
+      }, 1200);
+    } catch (err) {
+      console.warn("[CATI Check] Warning tone failed:", err);
+    }
   }
 
   async function startMicTest() {
@@ -325,18 +548,20 @@
         audioEl.hidden = false;
 
         micStatus.textContent = "Testopptak klart";
-        micDetails.textContent = "Lytt gjennom avspillingen og kontroller at lydnivå og kvalitet er god.";
+        micDetails.textContent = "Lytt gjennom avspillingen og kontroller lydnivå og kvalitet.";
         micBadge.className = "cati-badge cati-badge--good";
         micBadge.textContent = "OK";
 
+        const testedAt = new Date().toISOString();
+        localStorage.setItem(CONFIG.storageKeys.micLastTested, testedAt);
+        updateMicLastTestedUI();
+
         cleanupMedia(false);
 
-        audioEl.play().catch(() => {
-          // Avspilling kan kreve nytt brukerklikk i noen nettlesere.
-        });
+        audioEl.play().catch(() => {});
 
         micBtn.disabled = false;
-        micBtn.textContent = "Test mikrofon på nytt";
+        micBtn.textContent = "Test på nytt";
       };
 
       recorder.start();
@@ -368,12 +593,54 @@
     }
   }
 
+  function syncToggleUI() {
+    const pauseToggle = document.getElementById("catiNetworkPauseToggle");
+    const notifToggle = document.getElementById("catiNotificationsToggle");
+
+    if (pauseToggle) pauseToggle.checked = !!state.networkPaused;
+    if (notifToggle) notifToggle.checked = !!state.notificationsEnabled;
+  }
+
+  function updateMicLastTestedUI() {
+    const el = document.getElementById("catiMicLastTested");
+    if (!el) return;
+
+    const raw = localStorage.getItem(CONFIG.storageKeys.micLastTested);
+    if (!raw) {
+      el.textContent = "Sist testet: –";
+      return;
+    }
+
+    const dt = new Date(raw);
+    if (Number.isNaN(dt.getTime())) {
+      el.textContent = "Sist testet: –";
+      return;
+    }
+
+    el.textContent = `Sist testet: ${formatTime(dt)}`;
+  }
+
   function formatTime(date) {
     return date.toLocaleTimeString("no-NO", {
       hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit"
+      minute: "2-digit"
     });
+  }
+
+  function readBool(key, fallback) {
+    try {
+      const value = localStorage.getItem(key);
+      if (value === null) return fallback;
+      return value === "true";
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeBool(key, value) {
+    try {
+      localStorage.setItem(key, String(!!value));
+    } catch (_) {}
   }
 
   init();
