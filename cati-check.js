@@ -33,7 +33,9 @@
     consecutiveIssueCount: 0,
     originalTitle: document.title,
     titleAlertActive: false,
-    lastMeasurement: null
+    lastMeasurement: null,
+    audioContext: null,
+    audioUnlocked: false
   };
 
   function init() {
@@ -236,14 +238,14 @@
     const info = calculateNetworkStatus();
 
     const latencyText =
-      state.lastMeasurement && state.lastMeasurement.ok && state.lastMeasurement.latencyMs != null
-        ? `${state.lastMeasurement.latencyMs.toFixed(0)} ms`
+      info.avgLatency != null
+        ? `${info.avgLatency.toFixed(0)} ms`
         : "–";
 
     const lossText = info.lossPercent != null ? `${info.lossPercent.toFixed(1)} %` : "–";
 
     detailsEl.textContent =
-      `Live forsinkelse: ${latencyText} | Estimert pakketap (${CONFIG.timeWindowMinutes} min): ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount}`;
+      `Forsinkelse: ${latencyText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount}`;
 
     barEl.style.width = `${info.score}%`;
     badgeEl.className = "cati-badge";
@@ -386,60 +388,59 @@
     }
   }
 
-function playWarningTone() {
-  try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
+  function playWarningTone() {
+    try {
+      const ctx = state.audioContext;
+      if (!ctx || ctx.state !== "running") return;
 
-    const ctx = new AudioContextClass();
-    const now = ctx.currentTime;
+      const now = ctx.currentTime;
 
-    const master = ctx.createGain();
-    master.gain.setValueAtTime(0.0001, now);
-    master.gain.exponentialRampToValueAtTime(0.035, now + 0.03);
-    master.gain.exponentialRampToValueAtTime(0.0001, now + 1.1);
-    master.connect(ctx.destination);
+      const master = ctx.createGain();
+      master.gain.setValueAtTime(0.0001, now);
+      master.gain.exponentialRampToValueAtTime(0.03, now + 0.03);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + 1.0);
+      master.connect(ctx.destination);
 
-    const osc1 = ctx.createOscillator();
-    osc1.type = "triangle";
-    osc1.frequency.setValueAtTime(440, now);
-    osc1.frequency.exponentialRampToValueAtTime(390, now + 0.22);
+      const osc1 = ctx.createOscillator();
+      osc1.type = "triangle";
+      osc1.frequency.setValueAtTime(392, now);
+      osc1.frequency.exponentialRampToValueAtTime(340, now + 0.24);
 
-    const osc2 = ctx.createOscillator();
-    osc2.type = "triangle";
-    osc2.frequency.setValueAtTime(330, now + 0.28);
-    osc2.frequency.exponentialRampToValueAtTime(285, now + 0.58);
+      const osc2 = ctx.createOscillator();
+      osc2.type = "triangle";
+      osc2.frequency.setValueAtTime(294, now + 0.30);
+      osc2.frequency.exponentialRampToValueAtTime(247, now + 0.62);
 
-    const gain1 = ctx.createGain();
-    gain1.gain.setValueAtTime(0.0001, now);
-    gain1.gain.exponentialRampToValueAtTime(1, now + 0.02);
-    gain1.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+      const gain1 = ctx.createGain();
+      gain1.gain.setValueAtTime(0.0001, now);
+      gain1.gain.exponentialRampToValueAtTime(1, now + 0.03);
+      gain1.gain.exponentialRampToValueAtTime(0.0001, now + 0.30);
 
-    const gain2 = ctx.createGain();
-    gain2.gain.setValueAtTime(0.0001, now);
-    gain2.gain.setValueAtTime(0.0001, now + 0.26);
-    gain2.gain.exponentialRampToValueAtTime(1, now + 0.31);
-    gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.62);
+      const gain2 = ctx.createGain();
+      gain2.gain.setValueAtTime(0.0001, now);
+      gain2.gain.setValueAtTime(0.0001, now + 0.28);
+      gain2.gain.exponentialRampToValueAtTime(1, now + 0.34);
+      gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.68);
 
-    osc1.connect(gain1);
-    gain1.connect(master);
+      osc1.connect(gain1);
+      gain1.connect(master);
 
-    osc2.connect(gain2);
-    gain2.connect(master);
+      osc2.connect(gain2);
+      gain2.connect(master);
 
-    osc1.start(now);
-    osc1.stop(now + 0.3);
+      osc1.start(now);
+      osc1.stop(now + 0.32);
 
-    osc2.start(now);
-    osc2.stop(now + 0.66);
+      osc2.start(now);
+      osc2.stop(now + 0.72);
 
-    setTimeout(() => {
-      try { ctx.close(); } catch (_) {}
-    }, 1400);
-  } catch (err) {
-    console.warn("[CATI Check] Warning tone failed:", err);
+      setTimeout(() => {
+        try { master.disconnect(); } catch (_) {}
+      }, 1200);
+    } catch (err) {
+      console.warn("[CATI Check] Warning tone failed:", err);
+    }
   }
-}
 
   async function startMicTest() {
     const micBtn = document.getElementById("catiMicTestBtn");
@@ -496,9 +497,9 @@ function playWarningTone() {
         audioEl.hidden = false;
 
         micStatus.textContent = "Testopptak klart";
-        micDetails.textContent = "Lytt gjennom avspillingen og kontroller lydnivå og kvalitet.";
-        micBadge.className = "cati-badge cati-badge--good";
-        micBadge.textContent = "OK";
+        micDetails.textContent = "Lytt gjennom avspillingen og kontroller at lydnivå og kvalitet er god.";
+        micBadge.className = "cati-badge cati-badge--neutral";
+        micBadge.textContent = "Testet";
 
         cleanupMedia(false);
 
@@ -558,6 +559,32 @@ function playWarningTone() {
     try {
       localStorage.setItem(key, String(!!value));
     } catch (_) {}
+  }
+
+    async function unlockAudio() {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return false;
+
+      if (!state.audioContext) {
+        state.audioContext = new AudioContextClass();
+      }
+
+      if (state.audioContext.state === "suspended") {
+        await state.audioContext.resume();
+      }
+
+      state.audioUnlocked = state.audioContext.state === "running";
+      return state.audioUnlocked;
+    } catch (err) {
+      console.warn("[CATI Check] Audio unlock failed:", err);
+      return false;
+    }
+  }
+
+  async function primeInteractionFeatures() {
+    await unlockAudio();
+    tryAutoRequestNotificationPermission();
   }
 
   init();
