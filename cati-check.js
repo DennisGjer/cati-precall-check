@@ -4,7 +4,7 @@
     pingUrl: window.location.origin + "/favicon.ico",
     pingIntervalMs: 5000,
     pingTimeoutMs: 2500,
-    timeWindowMinutes: 10,
+    timeWindowMinutes: 30,
     severeLatencyMs: 600,
     warningLatencyMs: 250,
     severeLossPercent: 15,
@@ -32,7 +32,8 @@
     lastNetworkStatus: "unknown",
     consecutiveIssueCount: 0,
     originalTitle: document.title,
-    titleAlertActive: false
+    titleAlertActive: false,
+    lastMeasurement: null
   };
 
   function init() {
@@ -233,11 +234,16 @@
     }
 
     const info = calculateNetworkStatus();
-    const latencyText = info.avgLatency != null ? `${info.avgLatency.toFixed(0)} ms` : "–";
+
+    const latencyText =
+      state.lastMeasurement && state.lastMeasurement.ok && state.lastMeasurement.latencyMs != null
+        ? `${state.lastMeasurement.latencyMs.toFixed(0)} ms`
+        : "–";
+
     const lossText = info.lossPercent != null ? `${info.lossPercent.toFixed(1)} %` : "–";
 
     detailsEl.textContent =
-      `Forsinkelse: ${latencyText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount}`;
+      `Live forsinkelse: ${latencyText} | Estimert pakketap (${CONFIG.timeWindowMinutes} min): ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount}`;
 
     barEl.style.width = `${info.score}%`;
     badgeEl.className = "cati-badge";
@@ -286,22 +292,28 @@
         clearTimeout(timeoutId);
         const latency = performance.now() - start;
 
-        state.history.push({
+        const measurement = {
           ok: response.ok,
           latencyMs: response.ok ? latency : null,
           ts: Date.now()
-        });
+        };
+
+        state.lastMeasurement = measurement;
+        state.history.push(measurement);
 
         afterNetworkMeasurement();
       })
       .catch(() => {
         clearTimeout(timeoutId);
 
-        state.history.push({
+        const measurement = {
           ok: false,
           latencyMs: null,
           ts: Date.now()
-        });
+        };
+
+        state.lastMeasurement = measurement;
+        state.history.push(measurement);
 
         afterNetworkMeasurement();
       });
@@ -374,56 +386,60 @@
     }
   }
 
-  function playWarningTone() {
-    try {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContextClass) return;
+function playWarningTone() {
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
 
-      const ctx = new AudioContextClass();
-      const now = ctx.currentTime;
+    const ctx = new AudioContextClass();
+    const now = ctx.currentTime;
 
-      const master = ctx.createGain();
-      master.gain.setValueAtTime(0.0001, now);
-      master.gain.exponentialRampToValueAtTime(0.025, now + 0.02);
-      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.8);
-      master.connect(ctx.destination);
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(0.0001, now);
+    master.gain.exponentialRampToValueAtTime(0.035, now + 0.03);
+    master.gain.exponentialRampToValueAtTime(0.0001, now + 1.1);
+    master.connect(ctx.destination);
 
-      const osc1 = ctx.createOscillator();
-      osc1.type = "sine";
-      osc1.frequency.setValueAtTime(880, now);
+    const osc1 = ctx.createOscillator();
+    osc1.type = "triangle";
+    osc1.frequency.setValueAtTime(440, now);
+    osc1.frequency.exponentialRampToValueAtTime(390, now + 0.22);
 
-      const osc2 = ctx.createOscillator();
-      osc2.type = "sine";
-      osc2.frequency.setValueAtTime(660, now + 0.16);
+    const osc2 = ctx.createOscillator();
+    osc2.type = "triangle";
+    osc2.frequency.setValueAtTime(330, now + 0.28);
+    osc2.frequency.exponentialRampToValueAtTime(285, now + 0.58);
 
-      const gain1 = ctx.createGain();
-      gain1.gain.setValueAtTime(1, now);
-      gain1.gain.setValueAtTime(0.0001, now + 0.22);
+    const gain1 = ctx.createGain();
+    gain1.gain.setValueAtTime(0.0001, now);
+    gain1.gain.exponentialRampToValueAtTime(1, now + 0.02);
+    gain1.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
 
-      const gain2 = ctx.createGain();
-      gain2.gain.setValueAtTime(0.0001, now);
-      gain2.gain.setValueAtTime(0.0001, now + 0.15);
-      gain2.gain.exponentialRampToValueAtTime(1, now + 0.18);
-      gain2.gain.setValueAtTime(0.0001, now + 0.45);
+    const gain2 = ctx.createGain();
+    gain2.gain.setValueAtTime(0.0001, now);
+    gain2.gain.setValueAtTime(0.0001, now + 0.26);
+    gain2.gain.exponentialRampToValueAtTime(1, now + 0.31);
+    gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.62);
 
-      osc1.connect(gain1);
-      gain1.connect(master);
+    osc1.connect(gain1);
+    gain1.connect(master);
 
-      osc2.connect(gain2);
-      gain2.connect(master);
+    osc2.connect(gain2);
+    gain2.connect(master);
 
-      osc1.start(now);
-      osc1.stop(now + 0.24);
-      osc2.start(now);
-      osc2.stop(now + 0.5);
+    osc1.start(now);
+    osc1.stop(now + 0.3);
 
-      setTimeout(() => {
-        try { ctx.close(); } catch (_) {}
-      }, 1000);
-    } catch (err) {
-      console.warn("[CATI Check] Warning tone failed:", err);
-    }
+    osc2.start(now);
+    osc2.stop(now + 0.66);
+
+    setTimeout(() => {
+      try { ctx.close(); } catch (_) {}
+    }, 1400);
+  } catch (err) {
+    console.warn("[CATI Check] Warning tone failed:", err);
   }
+}
 
   async function startMicTest() {
     const micBtn = document.getElementById("catiMicTestBtn");
