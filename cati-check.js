@@ -2,9 +2,11 @@
   const CONFIG = {
     containerId: "cati-precall-check",
 
-    // Ekstern lett ressurs for generell internettsjekk.
-    // Velg gjerne en URL IT er komfortabel med.
-    pingUrl: "https://www.google.com/generate_204",
+  pingUrls: [
+    "https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png",
+    "https://www.cloudflare.com/favicon.ico",
+    "https://upload.wikimedia.org/favicon.ico"
+  ],
 
     pingIntervalMs: 15000,
     pingTimeoutMs: 2500,
@@ -42,8 +44,7 @@
     audioUnlocked: false,
 
     // Nytt: for å unngå overlappende ping
-    pingInFlight: false,
-    pingAbortController: null
+    pingInFlight: false
   };
 
   function init() {
@@ -133,13 +134,12 @@
         state.networkPaused = !state.networkPaused;
         writeBool(CONFIG.storageKeys.networkPaused, state.networkPaused);
 
-        if (state.networkPaused) {
-          stopNetworkInterval();
-          abortActivePing();
-        } else {
-          runPing();
-          startNetworkInterval();
-        }
+          if (state.networkPaused) {
+            stopNetworkInterval();
+          } else {
+            runPing();
+            startNetworkInterval();
+          }
 
         updateNetworkUI();
       });
@@ -163,16 +163,6 @@
       clearInterval(state.intervalId);
       state.intervalId = null;
     }
-  }
-
-  function abortActivePing() {
-    if (state.pingAbortController) {
-      try {
-        state.pingAbortController.abort();
-      } catch (_) {}
-      state.pingAbortController = null;
-    }
-    state.pingInFlight = false;
   }
 
   function trimHistory() {
@@ -324,72 +314,65 @@
     metaEl.textContent = `Sist oppdatert: ${formatTime(new Date())}`;
   }
 
-  async function runPing() {
-    if (state.networkPaused) return;
+async function runPing() {
+  if (state.networkPaused) return;
+  if (state.pingInFlight) return;
 
-    // Sørg for at kun én ping kjører av gangen
-    if (state.pingInFlight) {
-      return;
+  state.pingInFlight = true;
+
+  try {
+    const urls = Array.isArray(CONFIG.pingUrls) ? CONFIG.pingUrls : [];
+    if (!urls.length) {
+      throw new Error("No ping URLs configured");
     }
 
-    state.pingInFlight = true;
+    const results = [];
+    let firstSuccess = null;
 
-    const start = performance.now();
-    const controller = new AbortController();
-    state.pingAbortController = controller;
+    for (const url of urls) {
+      const result = await loadImageWithTimeout(url, CONFIG.pingTimeoutMs);
+      results.push(result);
 
-    let timeoutId = null;
-
-    try {
-      timeoutId = setTimeout(() => {
-        try {
-          controller.abort();
-        } catch (_) {}
-      }, CONFIG.pingTimeoutMs);
-
-      const response = await fetch(`${CONFIG.pingUrl}?_catiCheck=${Date.now()}`, {
-        method: "GET",
-        cache: "no-store",
-        mode: "cors",
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      const latency = performance.now() - start;
-
-      const measurement = {
-        ok: response.ok,
-        latencyMs: response.ok ? latency : null,
-        ts: Date.now(),
-        timedOut: false
-      };
-
-      state.lastMeasurement = measurement;
-      state.history.push(measurement);
-      afterNetworkMeasurement();
-
-    } catch (err) {
-      clearTimeout(timeoutId);
-
-      const isAbort = err && err.name === "AbortError";
-
-      const measurement = {
-        ok: false,
-        latencyMs: null,
-        ts: Date.now(),
-        timedOut: isAbort
-      };
-
-      state.lastMeasurement = measurement;
-      state.history.push(measurement);
-      afterNetworkMeasurement();
-
-    } finally {
-      state.pingAbortController = null;
-      state.pingInFlight = false;
+      if (result.ok) {
+        firstSuccess = result;
+        break;
+      }
     }
+
+    const measurement = {
+      ok: !!firstSuccess,
+      latencyMs: firstSuccess ? firstSuccess.latencyMs : null,
+      ts: Date.now(),
+      timedOut: !firstSuccess && results.every(r => r.timedOut),
+      checkedUrls: results.map(r => ({
+        url: r.url,
+        ok: r.ok,
+        timedOut: r.timedOut
+      }))
+    };
+
+    state.lastMeasurement = measurement;
+    state.history.push(measurement);
+    afterNetworkMeasurement();
+
+  } catch (err) {
+    console.warn("[CATI Check] External connectivity check failed:", err);
+
+    const measurement = {
+      ok: false,
+      latencyMs: null,
+      ts: Date.now(),
+      timedOut: false
+    };
+
+    state.lastMeasurement = measurement;
+    state.history.push(measurement);
+    afterNetworkMeasurement();
+
+  } finally {
+    state.pingInFlight = false;
   }
+}
 
   function afterNetworkMeasurement() {
     const info = calculateNetworkStatus();
@@ -645,6 +628,65 @@
       localStorage.setItem(key, String(!!value));
     } catch (_) {}
   }
+
+  function buildPingUrl(baseUrl) {
+  const separator = baseUrl.indexOf("?") >= 0 ? "&" : "?";
+  return `${baseUrl}${separator}_catiCheck=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function loadImageWithTimeout(url, timeoutMs) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    let finished = false;
+
+    const startedAt = performance.now();
+    const cleanup = () => {
+      img.onload = null;
+      img.onerror = null;
+    };
+
+    const timer = setTimeout(() => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve({
+        ok: false,
+        timedOut: true,
+        latencyMs: null,
+        url
+      });
+    }, timeoutMs);
+
+    img.onload = function () {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve({
+        ok: true,
+        timedOut: false,
+        latencyMs: performance.now() - startedAt,
+        url
+      });
+    };
+
+    img.onerror = function () {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve({
+        ok: false,
+        timedOut: false,
+        latencyMs: null,
+        url
+      });
+    };
+
+    img.referrerPolicy = "no-referrer";
+    img.src = buildPingUrl(url);
+  });
+}
 
   async function unlockAudio() {
     try {
