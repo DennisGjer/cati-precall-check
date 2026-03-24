@@ -23,6 +23,13 @@
     severeLossPercent: 15,
   
     micRecordSeconds: 7,
+    micMinVoiceRms: 0.02,
+    micGoodVoiceRms: 0.05,
+    micHighVoiceRms: 0.18,
+    micNoiseWarnRms: 0.015,
+    micNoiseBadRms: 0.03,
+    micClipThreshold: 0.98,
+    micClipWarnRatio: 0.02,
     notifyCooldownMs: 3 * 60 * 1000,
     minConsecutiveIssuesBeforeNotify: 2,
     titleAlertPrefix: "⚠ ",
@@ -49,9 +56,10 @@
     lastMeasurement: null,
     audioContext: null,
     audioUnlocked: false,
-
-    // Nytt: for å unngå overlappende ping
-    pingInFlight: false
+    pingInFlight: false,
+    micAnalyser: null,
+    micAnalysisFrameId: null,
+    micAnalysis: null
   };
 
   function init() {
@@ -109,7 +117,7 @@
 
             <div id="catiMicStatus" class="cati-card__status">Klar for test</div>
             <div id="catiMicDetails" class="cati-card__details">
-              Ta opp en kort lydtest og lytt til avspillingen.
+              Ta opp en kort lydtest. Systemet sjekker nivå og bakgrunnsstøy automatisk.
             </div>
 
             <div class="cati-mic-actions">
@@ -344,12 +352,8 @@ function updateNetworkUI() {
       )
     : "Siste måling: –";
 
-  const sourceText = state.lastMeasurement?.effectiveUrl
-    ? `Kilde: ${simplifyUrlLabel(state.lastMeasurement.effectiveUrl)}`
-    : "Kilde: –";
-
   detailsEl.textContent =
-    `Forsinkelse: ${latencyText} | Jitter: ${jitterText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount} | ${lastText} | ${sourceText}`;
+    `Forsinkelse: ${latencyText} | Jitter: ${jitterText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount} | ${lastText}`;
 
   barEl.style.width = `${info.score}%`;
   badgeEl.className = "cati-badge";
@@ -583,15 +587,180 @@ async function runPing() {
     }
   }
 
+  function createEmptyMicAnalysis() {
+  return {
+    samples: 0,
+    voiceSamples: 0,
+    silentSamples: 0,
+    rmsSum: 0,
+    voiceRmsSum: 0,
+    silentRmsSum: 0,
+    peak: 0,
+    clipCount: 0
+  };
+}
+
+function analyseMicFrame(dataArray) {
+  let sumSquares = 0;
+  let peak = 0;
+  let clipCount = 0;
+
+  for (let i = 0; i < dataArray.length; i++) {
+    const sample = dataArray[i];
+    sumSquares += sample * sample;
+
+    const abs = Math.abs(sample);
+    if (abs > peak) peak = abs;
+    if (abs >= CONFIG.micClipThreshold) clipCount++;
+  }
+
+  const rms = Math.sqrt(sumSquares / dataArray.length);
+
+  return {
+    rms,
+    peak,
+    clipCount,
+    totalSamples: dataArray.length
+  };
+}
+
+function startMicAnalysis(stream) {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return false;
+
+  if (!state.audioContext) {
+    state.audioContext = new AudioContextClass();
+  }
+
+  const ctx = state.audioContext;
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.2;
+  source.connect(analyser);
+
+  const buffer = new Float32Array(analyser.fftSize);
+  const analysis = createEmptyMicAnalysis();
+
+  state.micAnalyser = analyser;
+  state.micAnalysis = analysis;
+
+  function tick() {
+    if (!state.micAnalyser || !state.micAnalysis) return;
+
+    analyser.getFloatTimeDomainData(buffer);
+    const frame = analyseMicFrame(buffer);
+
+    analysis.samples++;
+    analysis.rmsSum += frame.rms;
+    if (frame.peak > analysis.peak) analysis.peak = frame.peak;
+    analysis.clipCount += frame.clipCount;
+
+    const isVoiceLike = frame.rms >= CONFIG.micMinVoiceRms;
+
+    if (isVoiceLike) {
+      analysis.voiceSamples++;
+      analysis.voiceRmsSum += frame.rms;
+    } else {
+      analysis.silentSamples++;
+      analysis.silentRmsSum += frame.rms;
+    }
+
+    state.micAnalysisFrameId = requestAnimationFrame(tick);
+  }
+
+  tick();
+  return true;
+}
+
+function stopMicAnalysis() {
+  if (state.micAnalysisFrameId) {
+    cancelAnimationFrame(state.micAnalysisFrameId);
+    state.micAnalysisFrameId = null;
+  }
+  state.micAnalyser = null;
+}
+
+function summarizeMicAnalysis(analysis) {
+  if (!analysis || !analysis.samples) {
+    return {
+      speechDetected: false,
+      levelLabel: "Ukjent",
+      noiseLabel: "Ukjent",
+      status: "neutral",
+      summary: "Kunne ikke analysere lydnivået."
+    };
+  }
+
+  const avgRms = analysis.samples ? analysis.rmsSum / analysis.samples : 0;
+  const avgVoiceRms = analysis.voiceSamples ? analysis.voiceRmsSum / analysis.voiceSamples : 0;
+  const avgSilentRms = analysis.silentSamples ? analysis.silentRmsSum / analysis.silentSamples : 0;
+  const clipRatio = analysis.samples ? analysis.clipCount / (analysis.samples * 2048) : 0;
+  const speechDetected = analysis.voiceSamples >= Math.max(4, Math.round(analysis.samples * 0.15));
+
+  let levelLabel = "Bra";
+  if (!speechDetected) {
+    levelLabel = "Ingen tale";
+  } else if (avgVoiceRms < CONFIG.micGoodVoiceRms) {
+    levelLabel = "Lavt";
+  } else if (avgVoiceRms > CONFIG.micHighVoiceRms || clipRatio > CONFIG.micClipWarnRatio) {
+    levelLabel = "For høyt";
+  }
+
+  let noiseLabel = "Lav";
+  if (avgSilentRms >= CONFIG.micNoiseBadRms) {
+    noiseLabel = "Høy";
+  } else if (avgSilentRms >= CONFIG.micNoiseWarnRms) {
+    noiseLabel = "Noe";
+  }
+
+  let status = "good";
+  let summary = "Mikrofon virker og lydnivået ser bra ut.";
+
+  if (!speechDetected) {
+    status = "bad";
+    summary = "Ingen tydelig tale registrert. Sjekk at riktig mikrofon er valgt og at du snakker under testen.";
+  } else if (levelLabel === "For høyt") {
+    status = "warning";
+    summary = "Mikrofon virker, men lydnivået er høyt. Prøv å snakke litt lenger fra mikrofonen.";
+  } else if (levelLabel === "Lavt" && noiseLabel === "Høy") {
+    status = "bad";
+    summary = "Lyden er svak og bakgrunnsstøyen er høy. Sjekk mikrofonplassering eller bytt til roligere omgivelser.";
+  } else if (levelLabel === "Lavt") {
+    status = "warning";
+    summary = "Mikrofon virker, men lydnivået er lavt. Prøv å snakke nærmere mikrofonen.";
+  } else if (noiseLabel === "Høy") {
+    status = "warning";
+    summary = "Mikrofon virker, men det er mye bakgrunnsstøy.";
+  } else if (noiseLabel === "Noe") {
+    status = "warning";
+    summary = "Mikrofon virker, men noe bakgrunnsstøy ble registrert.";
+  }
+
+  return {
+    speechDetected,
+    levelLabel,
+    noiseLabel,
+    status,
+    summary,
+    avgRms,
+    avgVoiceRms,
+    avgSilentRms,
+    peak: analysis.peak,
+    clipRatio
+  };
+}
+
   async function startMicTest() {
     const micBtn = document.getElementById("catiMicTestBtn");
     const micStatus = document.getElementById("catiMicStatus");
     const micDetails = document.getElementById("catiMicDetails");
     const micBadge = document.getElementById("catiMicBadge");
     const audioEl = document.getElementById("catiMicPlayback");
-
+  
     if (!micBtn || !micStatus || !micDetails || !micBadge || !audioEl) return;
-
+  
     if (!state.micSupported) {
       micStatus.textContent = "Mikrofontest støttes ikke";
       micDetails.textContent = "Nettleseren støtter ikke nødvendig lydopptak.";
@@ -599,66 +768,94 @@ async function runPing() {
       micBadge.textContent = "Ikke støttet";
       return;
     }
-
+  
     micBtn.disabled = true;
     micBtn.textContent = "Tester…";
     micStatus.textContent = "Ber om tilgang til mikrofon…";
     micDetails.textContent = "Tillat mikrofontilgang hvis nettleseren spør.";
     micBadge.className = "cati-badge cati-badge--neutral";
     micBadge.textContent = "Pågår";
-
+  
     try {
       cleanupMedia();
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+  
       state.mediaStream = stream;
       state.audioChunks = [];
-
+      state.micAnalysis = createEmptyMicAnalysis();
+  
       micStatus.textContent = "Tar opp testlyd…";
-      micDetails.textContent = `Snakk normalt i cirka ${CONFIG.micRecordSeconds} sekunder.`;
-
+      micDetails.textContent = `Snakk normalt i cirka ${CONFIG.micRecordSeconds} sekunder. Hold gjerne et kort øyeblikk stille mot slutten.`;
+  
+      startMicAnalysis(stream);
+  
       const recorder = new MediaRecorder(stream);
       state.mediaRecorder = recorder;
-
+  
       recorder.ondataavailable = function (event) {
         if (event.data && event.data.size > 0) {
           state.audioChunks.push(event.data);
         }
       };
-
+  
       recorder.onstop = function () {
-        const blob = new Blob(state.audioChunks, { type: recorder.mimeType || "audio/webm" });
-
+        const analysisSummary = summarizeMicAnalysis(state.micAnalysis);
+  
+        const blob = new Blob(state.audioChunks, {
+          type: recorder.mimeType || "audio/webm"
+        });
+  
         if (state.lastAudioUrl) {
           URL.revokeObjectURL(state.lastAudioUrl);
         }
-
+  
         state.lastAudioUrl = URL.createObjectURL(blob);
         audioEl.src = state.lastAudioUrl;
         audioEl.hidden = false;
-
-        micStatus.textContent = "Testopptak klart";
-        micDetails.textContent = "Lytt gjennom avspillingen og kontroller at lydnivå og kvalitet er god.";
-        micBadge.className = "cati-badge cati-badge--neutral";
-        micBadge.textContent = "Testet";
-
+  
+        if (analysisSummary.status === "good") {
+          micStatus.textContent = "Mikrofon virker";
+          micBadge.className = "cati-badge cati-badge--good";
+          micBadge.textContent = "God";
+        } else if (analysisSummary.status === "warning") {
+          micStatus.textContent = "Mikrofon virker, men bør sjekkes";
+          micBadge.className = "cati-badge cati-badge--warning";
+          micBadge.textContent = "Ustabil";
+        } else {
+          micStatus.textContent = "Mulig mikrofonproblem";
+          micBadge.className = "cati-badge cati-badge--bad";
+          micBadge.textContent = "Problem";
+        }
+  
+        micDetails.textContent =
+          `${analysisSummary.summary} Nivå: ${analysisSummary.levelLabel}. Bakgrunnsstøy: ${analysisSummary.noiseLabel}.`;
+  
         cleanupMedia(false);
-
+  
         audioEl.play().catch(() => {});
-
+  
         micBtn.disabled = false;
         micBtn.textContent = "Test på nytt";
       };
-
+  
       recorder.start();
-
+  
       setTimeout(() => {
         if (recorder.state !== "inactive") {
           recorder.stop();
         }
       }, CONFIG.micRecordSeconds * 1000);
-
+  
     } catch (err) {
+      cleanupMedia();
+  
       micStatus.textContent = "Mikrofontest mislyktes";
       micDetails.textContent = "Kunne ikke få tilgang til mikrofon. Kontroller tillatelser og valgt enhet.";
       micBadge.className = "cati-badge cati-badge--bad";
@@ -670,12 +867,16 @@ async function runPing() {
   }
 
   function cleanupMedia(resetRecorder = true) {
+    stopMicAnalysis();
+  
     if (state.mediaStream) {
       state.mediaStream.getTracks().forEach(track => track.stop());
       state.mediaStream = null;
     }
+  
     if (resetRecorder) {
       state.mediaRecorder = null;
+      state.micAnalysis = null;
     }
   }
 
@@ -705,15 +906,6 @@ async function runPing() {
   function buildPingUrl(baseUrl) {
   const separator = baseUrl.indexOf("?") >= 0 ? "&" : "?";
   return `${baseUrl}${separator}_catiCheck=${Date.now()}_${Math.random().toString(36).slice(2)}`;
-}
-
-function simplifyUrlLabel(url) {
-  try {
-    const host = new URL(url).hostname;
-    return host.replace(/^www\./, "");
-  } catch {
-    return url || "ukjent";
-  }
 }
 
 function loadImageWithTimeout(url, timeoutMs) {
