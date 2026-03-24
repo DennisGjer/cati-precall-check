@@ -1,20 +1,27 @@
 (function () {
   const CONFIG = {
     containerId: "cati-precall-check",
-
-  pingUrls: [
-    "https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png",
-    "https://www.cloudflare.com/favicon.ico",
-    "https://upload.wikimedia.org/favicon.ico"
-  ],
-
-    pingIntervalMs: 15000,
+  
+    pingUrls: [
+      "https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png", // primær
+      "https://www.cloudflare.com/favicon.ico", // fallback 1
+      "https://upload.wikimedia.org/favicon.ico" // fallback 2
+    ],
+  
+    pingIntervalMs: 10000,
     pingTimeoutMs: 2500,
     timeWindowMinutes: 30,
-    severeLatencyMs: 600,
+  
     warningLatencyMs: 250,
-    severeLossPercent: 15,
+    severeLatencyMs: 600,
+  
+    warningJitterMs: 80,
+    severeJitterMs: 150,
+    jitterSampleSize: 10,
+  
     warningLossPercent: 5,
+    severeLossPercent: 15,
+  
     micRecordSeconds: 7,
     notifyCooldownMs: 3 * 60 * 1000,
     minConsecutiveIssuesBeforeNotify: 2,
@@ -75,7 +82,7 @@
         <div class="cati-check__grid">
           <div class="cati-card cati-card--network">
             <div class="cati-card__top">
-              <div class="cati-card__label">Tilkobling</div>
+              <div class="cati-card__label">Internettilkobling</div>
               <div class="cati-card__top-right">
                 <span id="catiNetworkBadge" class="cati-badge cati-badge--neutral">Ukjent</span>
                 <button type="button" id="catiNetworkPauseBtn" class="cati-iconbtn" title="Pause nettverkssjekk" aria-label="Pause nettverkssjekk">×</button>
@@ -170,149 +177,212 @@
     state.history = state.history.filter(entry => entry.ts >= cutoff);
   }
 
-  function calculateNetworkStatus() {
-    trimHistory();
+function calculateNetworkStatus() {
+  trimHistory();
 
-    if (!state.history.length) {
-      return {
-        status: "unknown",
-        avgLatency: null,
-        lossPercent: null,
-        severeCount: 0,
-        score: 8
-      };
-    }
-
-    let okCount = 0;
-    let latencySum = 0;
-    let latencyCount = 0;
-    let severeCount = 0;
-
-    for (const item of state.history) {
-      const isSevere =
-        !item.ok ||
-        item.timedOut ||
-        (item.latencyMs != null && item.latencyMs > CONFIG.severeLatencyMs);
-
-      if (isSevere) severeCount++;
-
-      if (item.ok) {
-        okCount++;
-        if (item.latencyMs != null) {
-          latencySum += item.latencyMs;
-          latencyCount++;
-        }
-      }
-    }
-
-    const sampleCount = state.history.length;
-    const lossPercent = 100 - (okCount / sampleCount) * 100;
-    const avgLatency = latencyCount ? latencySum / latencyCount : null;
-
-    let status = "good";
-    if (avgLatency == null) {
-      status = "unknown";
-    } else if (lossPercent > CONFIG.severeLossPercent || avgLatency > CONFIG.severeLatencyMs) {
-      status = "bad";
-    } else if (lossPercent > CONFIG.warningLossPercent || avgLatency > CONFIG.warningLatencyMs) {
-      status = "warning";
-    }
-
-    let score = 100;
-    if (lossPercent != null) score -= Math.min(50, lossPercent * 3);
-    if (avgLatency != null) score -= Math.min(50, (avgLatency / 1000) * 50);
-    score = Math.max(0, Math.min(100, score));
-
+  if (!state.history.length) {
     return {
-      status,
-      avgLatency,
-      lossPercent,
-      severeCount,
-      score
+      status: "unknown",
+      avgLatency: null,
+      lossPercent: null,
+      jitterMs: null,
+      severeCount: 0,
+      score: 8,
+      effectiveUrl: null,
+      lastMeasurementWasSevere: false
     };
   }
 
-  function updateNetworkUI() {
-    const statusEl = document.getElementById("catiNetworkStatus");
-    const detailsEl = document.getElementById("catiNetworkDetails");
-    const badgeEl = document.getElementById("catiNetworkBadge");
-    const barEl = document.getElementById("catiNetworkBar");
-    const metaEl = document.getElementById("catiNetworkMeta");
-    const pauseBtn = document.getElementById("catiNetworkPauseBtn");
+  let okCount = 0;
+  let latencySum = 0;
+  let latencyCount = 0;
+  let severeCount = 0;
 
-    if (!statusEl || !detailsEl || !badgeEl || !barEl || !metaEl || !pauseBtn) return;
+  const successfulMeasurements = [];
 
-    if (state.networkPaused) {
-      statusEl.textContent = "Nettverkssjekk er satt på pause";
-      detailsEl.textContent = "Automatiske målinger er stoppet.";
-      badgeEl.textContent = "Pause";
-      badgeEl.className = "cati-badge cati-badge--neutral";
-      barEl.className = "cati-meter__bar cati-meter__bar--neutral";
-      barEl.style.width = "0%";
-      metaEl.textContent = `Sist oppdatert: ${formatTime(new Date())}`;
-      pauseBtn.textContent = "↻";
-      pauseBtn.title = "Start nettverkssjekk igjen";
-      clearTitleAlert();
-      return;
+  for (const item of state.history) {
+    if (item.ok && item.latencyMs != null) {
+      okCount++;
+      latencySum += item.latencyMs;
+      latencyCount++;
+
+      successfulMeasurements.push({
+        latencyMs: item.latencyMs,
+        effectiveUrl: item.effectiveUrl || null
+      });
     }
 
-    const info = calculateNetworkStatus();
+    const isSevere =
+      !item.ok ||
+      item.timedOut ||
+      (item.latencyMs != null && item.latencyMs > CONFIG.severeLatencyMs);
 
-    const latencyText =
-      info.avgLatency != null
-        ? `${info.avgLatency.toFixed(0)} ms`
-        : "–";
-
-    const lossText =
-      info.lossPercent != null
-        ? `${info.lossPercent.toFixed(1)} %`
-        : "–";
-
-    const lastText = state.lastMeasurement
-      ? (
-          state.lastMeasurement.ok
-            ? `Siste måling: ${Math.round(state.lastMeasurement.latencyMs)} ms`
-            : state.lastMeasurement.timedOut
-              ? "Siste måling: timeout"
-              : "Siste måling: mislyktes"
-        )
-      : "Siste måling: –";
-
-    detailsEl.textContent =
-      `Forsinkelse: ${latencyText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount} | ${lastText}`;
-
-    barEl.style.width = `${info.score}%`;
-    badgeEl.className = "cati-badge";
-    barEl.className = "cati-meter__bar";
-    pauseBtn.textContent = "×";
-    pauseBtn.title = "Pause nettverkssjekk";
-
-    if (info.status === "good") {
-      statusEl.textContent = "Stabil internettilkobling";
-      badgeEl.textContent = "God";
-      badgeEl.classList.add("cati-badge--good");
-      barEl.classList.add("cati-meter__bar--good");
-      clearTitleAlert();
-    } else if (info.status === "warning") {
-      statusEl.textContent = "Ustabil internettilkobling";
-      badgeEl.textContent = "Ustabil";
-      badgeEl.classList.add("cati-badge--warning");
-      barEl.classList.add("cati-meter__bar--warning");
-    } else if (info.status === "bad") {
-      statusEl.textContent = "Kritisk internettilkobling";
-      badgeEl.textContent = "Kritisk";
-      badgeEl.classList.add("cati-badge--bad");
-      barEl.classList.add("cati-meter__bar--bad");
-    } else {
-      statusEl.textContent = "Måler internettilkobling…";
-      badgeEl.textContent = "Ukjent";
-      badgeEl.classList.add("cati-badge--neutral");
-      barEl.classList.add("cati-meter__bar--neutral");
-      clearTitleAlert();
-    }
-
-    metaEl.textContent = `Sist oppdatert: ${formatTime(new Date())}`;
+    if (isSevere) severeCount++;
   }
+
+  const sampleCount = state.history.length;
+  const lossPercent = sampleCount ? 100 - (okCount / sampleCount) * 100 : null;
+  const avgLatency = latencyCount ? latencySum / latencyCount : null;
+
+  const jitterSource = successfulMeasurements.slice(-CONFIG.jitterSampleSize);
+
+  let jitterMs = null;
+  if (jitterSource.length >= 2) {
+    let diffSum = 0;
+    let diffCount = 0;
+
+    for (let i = 1; i < jitterSource.length; i++) {
+      const prev = jitterSource[i - 1];
+      const curr = jitterSource[i];
+
+      const sameSource = prev.effectiveUrl && curr.effectiveUrl && prev.effectiveUrl === curr.effectiveUrl;
+
+      if (sameSource) {
+        diffSum += Math.abs(curr.latencyMs - prev.latencyMs);
+        diffCount++;
+      }
+    }
+
+    if (diffCount >= 1) {
+      jitterMs = diffSum / diffCount;
+    }
+  }
+
+  const last = state.lastMeasurement;
+  const lastMeasurementWasSevere = !!(
+    last && (
+      !last.ok ||
+      last.timedOut ||
+      (last.latencyMs != null && last.latencyMs > CONFIG.severeLatencyMs)
+    )
+  );
+
+  let status = "good";
+
+  if (avgLatency == null) {
+    status = "unknown";
+  } else if (
+    lastMeasurementWasSevere ||
+    (lossPercent != null && lossPercent > CONFIG.severeLossPercent) ||
+    avgLatency > CONFIG.severeLatencyMs ||
+    (jitterMs != null && jitterMs > CONFIG.severeJitterMs)
+  ) {
+    status = "bad";
+  } else if (
+    (lossPercent != null && lossPercent > CONFIG.warningLossPercent) ||
+    avgLatency > CONFIG.warningLatencyMs ||
+    (jitterMs != null && jitterMs > CONFIG.warningJitterMs)
+  ) {
+    status = "warning";
+  }
+
+  let score = 100;
+  if (lossPercent != null) score -= Math.min(50, lossPercent * 3);
+  if (avgLatency != null) score -= Math.min(30, (avgLatency / 1000) * 30);
+  if (jitterMs != null) score -= Math.min(20, (jitterMs / 200) * 20);
+
+  if (lastMeasurementWasSevere) {
+    score -= 15;
+  }
+
+  score = Math.max(0, Math.min(100, score));
+
+  return {
+    status,
+    avgLatency,
+    lossPercent,
+    jitterMs,
+    severeCount,
+    score,
+    effectiveUrl: last?.effectiveUrl || null,
+    lastMeasurementWasSevere
+  };
+}
+
+function updateNetworkUI() {
+  const statusEl = document.getElementById("catiNetworkStatus");
+  const detailsEl = document.getElementById("catiNetworkDetails");
+  const badgeEl = document.getElementById("catiNetworkBadge");
+  const barEl = document.getElementById("catiNetworkBar");
+  const metaEl = document.getElementById("catiNetworkMeta");
+  const pauseBtn = document.getElementById("catiNetworkPauseBtn");
+
+  if (!statusEl || !detailsEl || !badgeEl || !barEl || !metaEl || !pauseBtn) return;
+
+  if (state.networkPaused) {
+    statusEl.textContent = "Nettverkssjekk er satt på pause";
+    detailsEl.textContent = "Automatiske målinger er stoppet.";
+    badgeEl.textContent = "Pause";
+    badgeEl.className = "cati-badge cati-badge--neutral";
+    barEl.className = "cati-meter__bar cati-meter__bar--neutral";
+    barEl.style.width = "0%";
+    metaEl.textContent = `Sist oppdatert: ${formatTime(new Date())}`;
+    pauseBtn.textContent = "↻";
+    pauseBtn.title = "Start nettverkssjekk igjen";
+    clearTitleAlert();
+    return;
+  }
+
+  const info = calculateNetworkStatus();
+
+  const latencyText =
+    info.avgLatency != null ? `${info.avgLatency.toFixed(0)} ms` : "–";
+
+  const jitterText =
+    info.jitterMs != null ? `${info.jitterMs.toFixed(0)} ms` : "–";
+
+  const lossText =
+    info.lossPercent != null ? `${info.lossPercent.toFixed(1)} %` : "–";
+
+  const lastText = state.lastMeasurement
+    ? (
+        state.lastMeasurement.ok
+          ? `Siste måling: ${Math.round(state.lastMeasurement.latencyMs)} ms`
+          : state.lastMeasurement.timedOut
+            ? "Siste måling: timeout"
+            : "Siste måling: mislyktes"
+      )
+    : "Siste måling: –";
+
+  const sourceText = state.lastMeasurement?.effectiveUrl
+    ? `Kilde: ${simplifyUrlLabel(state.lastMeasurement.effectiveUrl)}`
+    : "Kilde: –";
+
+  detailsEl.textContent =
+    `Forsinkelse: ${latencyText} | Jitter: ${jitterText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount} | ${lastText} | ${sourceText}`;
+
+  barEl.style.width = `${info.score}%`;
+  badgeEl.className = "cati-badge";
+  barEl.className = "cati-meter__bar";
+  pauseBtn.textContent = "×";
+  pauseBtn.title = "Pause nettverkssjekk";
+
+  if (info.status === "good") {
+    statusEl.textContent = "Stabil internettilkobling";
+    badgeEl.textContent = "God";
+    badgeEl.classList.add("cati-badge--good");
+    barEl.classList.add("cati-meter__bar--good");
+    clearTitleAlert();
+  } else if (info.status === "warning") {
+    statusEl.textContent = "Ustabil internettilkobling";
+    badgeEl.textContent = "Ustabil";
+    badgeEl.classList.add("cati-badge--warning");
+    barEl.classList.add("cati-meter__bar--warning");
+  } else if (info.status === "bad") {
+    statusEl.textContent = "Kritisk internettilkobling";
+    badgeEl.textContent = "Kritisk";
+    badgeEl.classList.add("cati-badge--bad");
+    barEl.classList.add("cati-meter__bar--bad");
+  } else {
+    statusEl.textContent = "Måler internettilkobling…";
+    badgeEl.textContent = "Ukjent";
+    badgeEl.classList.add("cati-badge--neutral");
+    barEl.classList.add("cati-meter__bar--neutral");
+    clearTitleAlert();
+  }
+
+  metaEl.textContent = `Sist oppdatert: ${formatTime(new Date())}`;
+}
 
 async function runPing() {
   if (state.networkPaused) return;
@@ -343,7 +413,8 @@ async function runPing() {
       ok: !!firstSuccess,
       latencyMs: firstSuccess ? firstSuccess.latencyMs : null,
       ts: Date.now(),
-      timedOut: !firstSuccess && results.every(r => r.timedOut),
+      timedOut: !firstSuccess && results.length > 0 && results.every(r => r.timedOut),
+      effectiveUrl: firstSuccess ? firstSuccess.url : null,
       checkedUrls: results.map(r => ({
         url: r.url,
         ok: r.ok,
@@ -362,7 +433,9 @@ async function runPing() {
       ok: false,
       latencyMs: null,
       ts: Date.now(),
-      timedOut: false
+      timedOut: false,
+      effectiveUrl: null,
+      checkedUrls: []
     };
 
     state.lastMeasurement = measurement;
@@ -632,6 +705,15 @@ async function runPing() {
   function buildPingUrl(baseUrl) {
   const separator = baseUrl.indexOf("?") >= 0 ? "&" : "?";
   return `${baseUrl}${separator}_catiCheck=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function simplifyUrlLabel(url) {
+  try {
+    const host = new URL(url).hostname;
+    return host.replace(/^www\./, "");
+  } catch {
+    return url || "ukjent";
+  }
 }
 
 function loadImageWithTimeout(url, timeoutMs) {
