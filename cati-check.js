@@ -1,7 +1,11 @@
 (function () {
   const CONFIG = {
     containerId: "cati-precall-check",
-    pingUrl: window.location.origin + "/favicon.ico",
+
+    // Ekstern lett ressurs for generell internettsjekk.
+    // Velg gjerne en URL IT er komfortabel med.
+    pingUrl: "https://www.gstatic.com/generate_204",
+
     pingIntervalMs: 15000,
     pingTimeoutMs: 2500,
     timeWindowMinutes: 30,
@@ -35,7 +39,11 @@
     titleAlertActive: false,
     lastMeasurement: null,
     audioContext: null,
-    audioUnlocked: false
+    audioUnlocked: false,
+
+    // Nytt: for å unngå overlappende ping
+    pingInFlight: false,
+    pingAbortController: null
   };
 
   function init() {
@@ -127,6 +135,7 @@
 
         if (state.networkPaused) {
           stopNetworkInterval();
+          abortActivePing();
         } else {
           runPing();
           startNetworkInterval();
@@ -136,14 +145,13 @@
       });
     }
 
-  if (startInterviewBtn) {
-    startInterviewBtn.addEventListener("click", function () {
-      // 🔥 kjør synkront først
-      unlockAudio();
-      primeInteractionFeatures();
-    }, { once: true });
+    if (startInterviewBtn) {
+      startInterviewBtn.addEventListener("click", function () {
+        unlockAudio();
+        primeInteractionFeatures();
+      }, { once: true });
+    }
   }
-}
 
   function startNetworkInterval() {
     stopNetworkInterval();
@@ -155,6 +163,16 @@
       clearInterval(state.intervalId);
       state.intervalId = null;
     }
+  }
+
+  function abortActivePing() {
+    if (state.pingAbortController) {
+      try {
+        state.pingAbortController.abort();
+      } catch (_) {}
+      state.pingAbortController = null;
+    }
+    state.pingInFlight = false;
   }
 
   function trimHistory() {
@@ -181,7 +199,11 @@
     let severeCount = 0;
 
     for (const item of state.history) {
-      const isSevere = !item.ok || (item.latencyMs != null && item.latencyMs > CONFIG.severeLatencyMs);
+      const isSevere =
+        !item.ok ||
+        item.timedOut ||
+        (item.latencyMs != null && item.latencyMs > CONFIG.severeLatencyMs);
+
       if (isSevere) severeCount++;
 
       if (item.ok) {
@@ -251,10 +273,23 @@
         ? `${info.avgLatency.toFixed(0)} ms`
         : "–";
 
-    const lossText = info.lossPercent != null ? `${info.lossPercent.toFixed(1)} %` : "–";
+    const lossText =
+      info.lossPercent != null
+        ? `${info.lossPercent.toFixed(1)} %`
+        : "–";
+
+    const lastText = state.lastMeasurement
+      ? (
+          state.lastMeasurement.ok
+            ? `Siste måling: ${Math.round(state.lastMeasurement.latencyMs)} ms`
+            : state.lastMeasurement.timedOut
+              ? "Siste måling: timeout"
+              : "Siste måling: mislyktes"
+        )
+      : "Siste måling: –";
 
     detailsEl.textContent =
-      `Forsinkelse: ${latencyText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount}`;
+      `Forsinkelse: ${latencyText} | Estimert pakketap: ${lossText} | Alvorlige avvik (${CONFIG.timeWindowMinutes} min): ${info.severeCount} | ${lastText}`;
 
     barEl.style.width = `${info.score}%`;
     badgeEl.className = "cati-badge";
@@ -263,23 +298,23 @@
     pauseBtn.title = "Pause nettverkssjekk";
 
     if (info.status === "good") {
-      statusEl.textContent = "Stabil tilkobling";
+      statusEl.textContent = "Stabil internettilkobling";
       badgeEl.textContent = "God";
       badgeEl.classList.add("cati-badge--good");
       barEl.classList.add("cati-meter__bar--good");
       clearTitleAlert();
     } else if (info.status === "warning") {
-      statusEl.textContent = "Ustabil tilkobling";
+      statusEl.textContent = "Ustabil internettilkobling";
       badgeEl.textContent = "Ustabil";
       badgeEl.classList.add("cati-badge--warning");
       barEl.classList.add("cati-meter__bar--warning");
     } else if (info.status === "bad") {
-      statusEl.textContent = "Kritisk tilkobling";
+      statusEl.textContent = "Kritisk internettilkobling";
       badgeEl.textContent = "Kritisk";
       badgeEl.classList.add("cati-badge--bad");
       barEl.classList.add("cati-meter__bar--bad");
     } else {
-      statusEl.textContent = "Måler tilkobling…";
+      statusEl.textContent = "Måler internettilkobling…";
       badgeEl.textContent = "Ukjent";
       badgeEl.classList.add("cati-badge--neutral");
       barEl.classList.add("cati-meter__bar--neutral");
@@ -289,45 +324,71 @@
     metaEl.textContent = `Sist oppdatert: ${formatTime(new Date())}`;
   }
 
-  function runPing() {
+  async function runPing() {
+    if (state.networkPaused) return;
+
+    // Sørg for at kun én ping kjører av gangen
+    if (state.pingInFlight) {
+      return;
+    }
+
+    state.pingInFlight = true;
+
     const start = performance.now();
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), CONFIG.pingTimeoutMs);
+    state.pingAbortController = controller;
 
-    fetch(`${CONFIG.pingUrl}?_catiCheck=${Date.now()}`, {
-      method: "HEAD",
-      cache: "no-store",
-      signal: controller.signal
-    })
-      .then(response => {
-        clearTimeout(timeoutId);
-        const latency = performance.now() - start;
+    let timeoutId = null;
 
-        const measurement = {
-          ok: response.ok,
-          latencyMs: response.ok ? latency : null,
-          ts: Date.now()
-        };
+    try {
+      timeoutId = setTimeout(() => {
+        try {
+          controller.abort();
+        } catch (_) {}
+      }, CONFIG.pingTimeoutMs);
 
-        state.lastMeasurement = measurement;
-        state.history.push(measurement);
-
-        afterNetworkMeasurement();
-      })
-      .catch(() => {
-        clearTimeout(timeoutId);
-
-        const measurement = {
-          ok: false,
-          latencyMs: null,
-          ts: Date.now()
-        };
-
-        state.lastMeasurement = measurement;
-        state.history.push(measurement);
-
-        afterNetworkMeasurement();
+      const response = await fetch(`${CONFIG.pingUrl}?_catiCheck=${Date.now()}`, {
+        method: "GET",
+        cache: "no-store",
+        mode: "cors",
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId);
+
+      const latency = performance.now() - start;
+
+      const measurement = {
+        ok: response.ok,
+        latencyMs: response.ok ? latency : null,
+        ts: Date.now(),
+        timedOut: false
+      };
+
+      state.lastMeasurement = measurement;
+      state.history.push(measurement);
+      afterNetworkMeasurement();
+
+    } catch (err) {
+      clearTimeout(timeoutId);
+
+      const isAbort = err && err.name === "AbortError";
+
+      const measurement = {
+        ok: false,
+        latencyMs: null,
+        ts: Date.now(),
+        timedOut: isAbort
+      };
+
+      state.lastMeasurement = measurement;
+      state.history.push(measurement);
+      afterNetworkMeasurement();
+
+    } finally {
+      state.pingAbortController = null;
+      state.pingInFlight = false;
+    }
   }
 
   function afterNetworkMeasurement() {
@@ -358,8 +419,8 @@
       : "Ustabil tilkobling oppdaget";
 
     const body = info.status === "bad"
-      ? "Tilkoblingen virker kritisk. Sjekk nettverk eller flytt til mer stabil forbindelse."
-      : "Tilkoblingen virker ustabil. Du kan oppleve lydproblemer.";
+      ? "Internettilkoblingen virker kritisk. Sjekk nettverk eller flytt til mer stabil forbindelse."
+      : "Internettilkoblingen virker ustabil. Du kan oppleve lydproblemer.";
 
     if ("Notification" in window && Notification.permission === "granted") {
       try {
@@ -397,27 +458,25 @@
     }
   }
 
-function playWarningTone() {
-  try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  function playWarningTone() {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
 
-    // 🔥 fallback: lag context hvis den ikke finnes
-    if (!state.audioContext && AudioContextClass) {
-      state.audioContext = new AudioContextClass();
-    }
+      if (!state.audioContext && AudioContextClass) {
+        state.audioContext = new AudioContextClass();
+      }
 
-    const ctx = state.audioContext;
-    console.log("[CATI Check] playWarningTone called. Audio state:", ctx?.state);
+      const ctx = state.audioContext;
+      console.log("[CATI Check] playWarningTone called. Audio state:", ctx?.state);
 
-    // 🔥 hvis fortsatt ikke klar → prøv å resume
-    if (ctx && ctx.state === "suspended") {
-      ctx.resume();
-    }
+      if (ctx && ctx.state === "suspended") {
+        ctx.resume();
+      }
 
-    if (!ctx || ctx.state !== "running") {
-      console.warn("[CATI Check] Audio not unlocked yet");
-      return;
-    }
+      if (!ctx || ctx.state !== "running") {
+        console.warn("[CATI Check] Audio not unlocked yet");
+        return;
+      }
 
       const now = ctx.currentTime;
 
@@ -587,7 +646,7 @@ function playWarningTone() {
     } catch (_) {}
   }
 
-    async function unlockAudio() {
+  async function unlockAudio() {
     try {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       if (!AudioContextClass) return false;
