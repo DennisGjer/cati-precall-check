@@ -2,7 +2,7 @@
   const CONFIG = {
     containerId: "cati-precall-check",
     pingUrl: window.location.origin + "/favicon.ico",
-    pingIntervalMs: 5000,
+    pingIntervalMs: 15000,
     pingTimeoutMs: 2500,
     timeWindowMinutes: 30,
     severeLatencyMs: 600,
