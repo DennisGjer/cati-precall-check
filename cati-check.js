@@ -4,7 +4,7 @@
 
     // Ekstern lett ressurs for generell internettsjekk.
     // Velg gjerne en URL IT er komfortabel med.
-    pingUrl: "https://www.gstatic.com/generate_204",
+    pingUrl: "https://www.google.com/generate_204",
 
     pingIntervalMs: 15000,
     pingTimeoutMs: 2500,
